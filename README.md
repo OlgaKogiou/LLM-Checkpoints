@@ -5,6 +5,7 @@ This guide provides instructions for running the DeepSpeed training scripts on t
 ## Environment Setup
 Use **Python 3.10** for this project
 - dependencies.txt --> for the conda env
+- Olga's env: datastates-llm
 
 ### CUDA Environment Variables
 Ensure you have **CUDA Toolkit 11.8** available on your system. 
