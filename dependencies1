@@ -1,0 +1,67 @@
+aiohappyeyeballs==2.6.1
+aiohttp==3.12.15
+aiosignal==1.4.0
+annotated-types==0.7.0
+async-timeout==5.0.1
+attrs==25.3.0
+brotlicffi @ file:///croot/brotlicffi_1736182461069/work
+certifi @ file:///croot/certifi_1754570635119/work/certifi
+cffi @ file:///croot/cffi_1736182485317/work
+charset-normalizer @ file:///croot/charset-normalizer_1721748349566/work
+datasets==4.0.0
+deepspeed==0.17.5
+dill==0.3.8
+einops==0.8.1
+filelock @ file:///croot/filelock_1744281381737/work
+frozenlist==1.7.0
+fsspec==2025.3.0
+gmpy2 @ file:///croot/gmpy2_1738085463648/work
+hf-xet==1.1.10
+hjson==3.1.0
+huggingface-hub==0.34.4
+idna @ file:///croot/idna_1714398848350/work
+Jinja2 @ file:///croot/jinja2_1741710844255/work
+MarkupSafe @ file:///croot/markupsafe_1738584038848/work
+mkl-service==2.4.0
+mkl_fft @ file:///io/mkl313/mkl_fft_1730824109137/work
+mkl_random @ file:///io/mkl313/mkl_random_1730823916628/work
+mpmath @ file:///croot/mpmath_1690848262763/work
+msgpack==1.1.1
+multidict==6.6.4
+multiprocess==0.70.16
+networkx @ file:///croot/networkx_1737039604450/work
+ninja==1.13.0
+numpy @ file:///croot/numpy_and_numpy_base_1725470312869/work/dist/numpy-2.0.1-cp310-cp310-linux_x86_64.whl#sha256=120568f3fd675f59e4cb6de79a5c193b4067d90878d8bab2040fda8e3a2df6fa
+nvidia-ml-py==13.580.82
+packaging==25.0
+pandas==2.3.2
+pillow @ file:///croot/pillow_1752524526621/work
+propcache==0.3.2
+psutil==7.0.0
+py-cpuinfo==9.0.0
+pyarrow==21.0.0
+pycparser @ file:///home/task_175749556993857/conda-bld/pycparser_1757496041120/work
+pydantic==2.11.9
+pydantic_core==2.33.2
+PySocks @ file:///home/builder/ci_310/pysocks_1640793678128/work
+python-dateutil==2.9.0.post0
+pytz==2025.2
+PyYAML @ file:///croot/pyyaml_1728657952215/work
+regex==2025.9.1
+requests @ file:///croot/requests_1756709366904/work
+safetensors==0.6.2
+six==1.17.0
+sympy==1.13.1
+tokenizers==0.22.0
+torch==2.5.1
+torchaudio==2.5.1
+torchvision==0.20.1
+tqdm==4.67.1
+transformers==4.56.1
+triton==3.1.0
+typing-inspection==0.4.1
+typing_extensions @ file:///croot/typing_extensions_1756280817316/work
+tzdata==2025.2
+urllib3 @ file:///croot/urllib3_1750775463400/work
+xxhash==3.5.0
+yarl==1.20.1
