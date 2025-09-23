@@ -34,7 +34,10 @@ PY
 
 git clone https://github.com/eth-easl/pccheck.git
 
-cd pccheck
+cd ~/pccheck
+pip install -e .          # makes `checkpoint_eval` importable
+pip install -r requirements.txt  # if you haven’t already
+
 
 chmod 777 install_preq_at_vm.sh
 
