@@ -1,54 +1,143 @@
-# driver present?
-nvidia-smi
+#!/usr/bin/env bash
+set -euo pipefail
 
-# OS deps used by pccheck and common DL tooling
-sudo apt-get update
-sudo apt-get install -y build-essential git wget curl cmake \
-    libpmem-dev librpmem-dev libpmemblk-dev libpmemlog-dev libpmemobj-dev libpmempool-dev \
-    libpci-dev numactl
+# ---------- knobs you can tweak ----------
+ENV_NAME="pccheck121"
+REPO_DIR="$HOME/pccheck"
+CUDA_VER_DIR="/usr/local/cuda-12.1"
+# ----------------------------------------
 
+echo "=== [0] Preflight ==="
+if ! command -v sudo >/dev/null 2>&1; then
+  echo "[ERR] This script needs sudo for apt installs."; exit 1
+fi
+if ! command -v lsb_release >/dev/null 2>&1; then
+  sudo apt-get update -y && sudo apt-get install -y lsb-release
+fi
+echo "[INFO] OS: $(lsb_release -ds || echo unknown)"
 
-# If you don’t have conda yet:
-cd ~
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-bash miniconda.sh -b -p $HOME/miniconda
-eval "$($HOME/miniconda/bin/conda shell.bash hook)"
+echo "=== [1] NVIDIA driver check/install ==="
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "[WARN] nvidia-smi not found -> installing recommended NVIDIA driver"
+  sudo apt-get update -y
+  sudo apt-get install -y ubuntu-drivers-common
+  ubuntu-drivers devices || true
+  # Try specific 565; if unavailable, fall back to autoinstall
+  if apt-cache policy nvidia-driver-565 | grep -q Candidate; then
+    sudo apt-get install -y nvidia-driver-565
+  else
+    sudo ubuntu-drivers autoinstall
+  fi
+  echo "[ACTION] Driver installed. Please REBOOT now, then re-run this same script."
+  exit 0
+else
+  echo "[OK] nvidia-smi present:"
+  nvidia-smi || true
+fi
 
-# fresh env
-conda create -y -n pccheck python=3.9
-conda activate pccheck
+echo "=== [2] CUDA 12.1 toolkit (headers/nvcc) ==="
+if [ ! -d "$CUDA_VER_DIR" ]; then
+  echo "[INFO] Installing CUDA 12.1 toolkit via NVIDIA repo"
+  sudo apt-get update -y
+  sudo apt-get install -y wget gnupg
+  wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
+  sudo dpkg -i /tmp/cuda-keyring.deb
+  sudo apt-get update -y
+  sudo apt-get install -y cuda-toolkit-12-1
+  sudo ln -sfn "$CUDA_VER_DIR" /usr/local/cuda
+fi
+export CUDA_HOME="$CUDA_VER_DIR"
+export PATH="$CUDA_VER_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_VER_DIR/lib64:${LD_LIBRARY_PATH:-}"
+echo "[OK] nvcc: $(nvcc --version | head -n1)"
 
-# PyTorch/cu121 wheels (11.6 for PMEM)
-pip install --upgrade pip
-pip install --index-url https://download.pytorch.org/whl/cu121 \ 
-  torch torchvision torchaudio
+echo "=== [3] Build toolchain ==="
+sudo apt-get update -y
+sudo apt-get install -y build-essential gcc-9 g++-9 git cmake ninja-build libaio-dev
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90
+sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 90
+echo "[OK] gcc: $(gcc --version | head -1)"
 
+echo "=== [4] Miniconda (if missing) ==="
+if ! command -v conda >/dev/null 2>&1; then
+  echo "[INFO] Installing Miniconda (user-local)"
+  cd /tmp
+  curl -fsSLo /tmp/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+  bash /tmp/miniconda.sh -b -p "$HOME/miniconda3"
+  eval "$("$HOME/miniconda3/bin/conda" shell.bash hook)"
+  conda init bash
+else
+  eval "$(conda shell.bash hook)"
+fi
 
-#check the version, GPU checks
+echo "=== [5] Conda env ==="
+if conda env list | grep -qE "^$ENV_NAME\s"; then
+  echo "[INFO] Conda env $ENV_NAME already exists"
+else
+  conda create -y -n "$ENV_NAME" python=3.9
+fi
+conda activate "$ENV_NAME"
+python -V
+
+echo "=== [6] PyTorch cu121 + deps ==="
+pip install --upgrade pip wheel setuptools
+pip install --index-url https://download.pytorch.org/whl/cu121 \
+  torch==2.4.1+cu121 torchvision==0.19.1+cu121 torchaudio==2.4.1+cu121
+pip install deepspeed==0.12.6 accelerate==0.20.3 numpy==1.26.2 \
+           wget nltk pynvml sacremoses evaluate matplotlib boto3 lamb
 python - <<'PY'
-import torch
-print("CUDA", torch.version.cuda, "| Torch", torch.__version__)
-print("GPUs:", torch.cuda.device_count())
+import torch, torchvision, deepspeed, accelerate
+print("[OK] torch", torch.__version__, "CUDA", torch.version.cuda)
+print("[OK] torchvision", torchvision.__version__)
+print("[OK] CUDA available", torch.cuda.is_available(), "GPUs", torch.cuda.device_count())
+if torch.cuda.is_available():
+    for i in range(torch.cuda.device_count()):
+        p=torch.cuda.get_device_properties(i); print(f"  GPU[{i}] {p.name} cc {p.major}.{p.minor}")
 PY
 
+echo "=== [7] NVIDIA Apex (V100 arch) ==="
+if [ ! -d "$HOME/apex" ]; then git clone https://github.com/NVIDIA/apex.git "$HOME/apex"; fi
+pushd "$HOME/apex" >/dev/null
+export TORCH_CUDA_ARCH_LIST="7.0"
+pip install -v --no-build-isolation --no-cache-dir \
+  --global-option="--cpp_ext" --global-option="--cuda_ext" .
+popd >/dev/null
 
-git clone https://github.com/eth-easl/pccheck.git
+echo "=== [8] PCcheck repo (editable) ==="
+if [ ! -d "$REPO_DIR" ]; then git clone https://github.com/eth-easl/pccheck.git "$REPO_DIR"; fi
+pushd "$REPO_DIR" >/dev/null
+pip install -e .
+export PYTHONPATH="$PWD:$PYTHONPATH"
+echo "[OK] PYTHONPATH wired -> $(python -c 'import sys;print(sys.path[0])')"
 
-cd ~/pccheck
-pip install -e .          # makes `checkpoint_eval` importable
-pip install -r requirements.txt  # if you haven’t already
+echo "=== [9] Build native writer (.so) against CUDA 12.1 ==="
+pushd checkpoint_eval/pccheck >/dev/null
+rm -f *.o *.so
+# some trees include -lpmem in Makefile; we compile directly to avoid PMem dep
+g++-9 -O3 -fPIC -std=c++17 \
+  -I"$CUDA_HOME/include" \
+  -shared main_ssd_memory.cpp socket_work.cpp \
+  -o libtest_ssd.so \
+  -L"$CUDA_HOME/lib64" -lcudart -lpthread -laio -latomic
+echo "[DEBUG] ldd libtest_ssd.so:"
+ldd libtest_ssd.so | grep -E 'cudart|aio|pthread' || true
+popd >/dev/null
 
+echo "=== [10] Smoke test (VGG16; ckpt every 50 iters) ==="
+export TOKENIZERS_PARALLELISM=false
+if [ -f artifact_evaluation/test_simple.sh ]; then
+  bash artifact_evaluation/test_simple.sh | tee /tmp/pccheck_smoke.log
+else
+  python checkpoint_eval/models/vision/train_pccheck.py \
+    --arch vgg16 --batchsize 32 --dataset imagenet \
+    --cfreq 50 --max_async 4 --num_threads 2 --psize 1 \
+    --bench_total_steps 500 \
+    --c_lib_path "$REPO_DIR/checkpoint_eval/pccheck/libtest_ssd.so" \
+  | tee /tmp/pccheck_smoke.log
+fi
 
-chmod 777 install_preq_at_vm.sh
+echo "---- summary ----"
+grep -E "Single Checkpoint time|THROUGHPUT IS" /tmp/pccheck_smoke.log || true
+popd >/dev/null
 
-chmod 777 install.sh
-
-cd ~/pccheck/artifact_evaluation
-
-chmod 777 test_simple.sh 
-
-
- ./test_simple.sh #(vgg dataset, it will make ckpt file on current dir named: pccheck_checkpoint.chk)
-
-
- Other model is complaining
+echo "✅ All set."
