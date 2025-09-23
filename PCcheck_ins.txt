@@ -70,31 +70,74 @@ else
   eval "$(conda shell.bash hook)"
 fi
 
-echo "=== [5] Conda env ==="
-if conda env list | grep -qE "^$ENV_NAME\s"; then
-  echo "[INFO] Conda env $ENV_NAME already exists"
-else
-  conda create -y -n "$ENV_NAME" python=3.9
-fi
-conda activate "$ENV_NAME"
-python -V
+############################################
+# [5] Conda env (safe)                     #
+############################################
+ENV_NAME="${ENV_NAME:-pccheck121}"     # default if unset
+echo "=== [5] Conda env: ${ENV_NAME} ==="
 
+# load conda into this shell
+source "$(conda info --base)/etc/profile.d/conda.sh"
+
+# create if missing
+if ! conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
+  conda create -y -n "${ENV_NAME}" python=3.9
+fi
+
+# activate and show which python we’ll use
+conda activate "${ENV_NAME}"
+hash -r
+python -V
+echo "[guard] python exe: $(which python)"
+python -m pip --version
+
+############################################
+# [6] PyTorch cu121 + deps (paper pins)    #
+############################################
 echo "=== [6] PyTorch cu121 + deps ==="
-pip install --upgrade pip wheel setuptools
-pip install --index-url https://download.pytorch.org/whl/cu121 \
-  torch==2.4.1+cu121 torchvision==0.19.1+cu121 torchaudio==2.4.1+cu121
-pip install deepspeed==0.12.6 accelerate==0.20.3 numpy==1.26.2 \
-           wget nltk pynvml sacremoses evaluate matplotlib boto3 lamb
+python -m pip install --upgrade pip wheel setuptools
+
+# ensure we don't mix versions
+python -m pip uninstall -y torch torchvision torchaudio || true
+
+# Torch 2.1.x + cu121 (matches repo)
+python -m pip install --index-url https://download.pytorch.org/whl/cu121 \
+  'torch==2.1.2+cu121' 'torchvision==0.16.2+cu121' 'torchaudio==2.1.2+cu121'
+
+# Other python deps (as pinned)
+python -m pip install \
+  'deepspeed==0.12.6' 'accelerate==0.20.3' 'numpy==1.26.2' \
+  wget nltk pynvml sacremoses evaluate matplotlib boto3 lamb
+
+# ---- Ensure a proper HF Transformers (torchvision + dynamo hook needs it) ----
 python - <<'PY'
-import torch, torchvision, deepspeed, accelerate
+import importlib, sys
+try:
+    m = importlib.import_module("transformers")
+    print(f"[check] transformers:", getattr(m,'__version__',None), "at", getattr(m,'__file__',None))
+except Exception as e:
+    print("[check] transformers import failed:", e)
+    raise SystemExit(3)
+PY
+if [ $? -ne 0 ]; then
+  python -m pip uninstall -y transformers tokenizers || true
+  python -m pip install 'transformers==4.36.2' 'tokenizers<0.20'
+fi
+
+# Guard: local dir named 'transformers' would shadow the package
+[ -d "./transformers" ] && echo "[warning] You are in ./transformers; cd away to avoid shadowing."
+
+# sanity check
+python - <<'PY'
+import sys, torch, torchvision, deepspeed, accelerate
+print("[OK] exe:", sys.executable)
 print("[OK] torch", torch.__version__, "CUDA", torch.version.cuda)
 print("[OK] torchvision", torchvision.__version__)
-print("[OK] CUDA available", torch.cuda.is_available(), "GPUs", torch.cuda.device_count())
-if torch.cuda.is_available():
-    for i in range(torch.cuda.device_count()):
-        p=torch.cuda.get_device_properties(i); print(f"  GPU[{i}] {p.name} cc {p.major}.{p.minor}")
+print("[OK] deepspeed", deepspeed.__version__)
+print("[OK] CUDA available:", torch.cuda.is_available(), "GPUs:", torch.cuda.device_count())
+for i in range(torch.cuda.device_count()):
+    p=torch.cuda.get_device_properties(i); print(f"  GPU[{i}] {p.name} cc {p.major}.{p.minor}")
 PY
-
 echo "=== [7] NVIDIA Apex (V100 arch) ==="
 if [ ! -d "$HOME/apex" ]; then git clone https://github.com/NVIDIA/apex.git "$HOME/apex"; fi
 pushd "$HOME/apex" >/dev/null
