@@ -18,9 +18,9 @@ eval "$($HOME/miniconda/bin/conda shell.bash hook)"
 conda create -y -n pccheck python=3.9
 conda activate pccheck
 
-# PyTorch/cu121 wheels
+# PyTorch/cu121 wheels (11.6 for PMEM)
 pip install --upgrade pip
-pip install --index-url https://download.pytorch.org/whl/cu121 \
+pip install --index-url https://download.pytorch.org/whl/cu121 \ 
   torch torchvision torchaudio
 
 
