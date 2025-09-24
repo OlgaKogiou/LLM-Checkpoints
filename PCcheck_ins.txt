@@ -6,8 +6,9 @@ ENV_NAME="pccheck121"
 REPO_DIR="$HOME/pccheck"
 CUDA_VER_DIR="/usr/local/cuda-12.1"
 # ----------------------------------------
-
+############################################
 echo "=== [0] Preflight ==="
+############################################
 if ! command -v sudo >/dev/null 2>&1; then
   echo "[ERR] This script needs sudo for apt installs."; exit 1
 fi
@@ -16,7 +17,10 @@ if ! command -v lsb_release >/dev/null 2>&1; then
 fi
 echo "[INFO] OS: $(lsb_release -ds || echo unknown)"
 
+############################################
 echo "=== [1] NVIDIA driver check/install ==="
+############################################
+
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "[WARN] nvidia-smi not found -> installing recommended NVIDIA driver"
   sudo apt-get update -y
@@ -35,7 +39,10 @@ else
   nvidia-smi || true
 fi
 
+############################################
 echo "=== [2] CUDA 12.1 toolkit (headers/nvcc) ==="
+############################################
+
 if [ ! -d "$CUDA_VER_DIR" ]; then
   echo "[INFO] Installing CUDA 12.1 toolkit via NVIDIA repo"
   sudo apt-get update -y
@@ -51,14 +58,19 @@ export PATH="$CUDA_VER_DIR/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_VER_DIR/lib64:${LD_LIBRARY_PATH:-}"
 echo "[OK] nvcc: $(nvcc --version | head -n1)"
 
+############################################
 echo "=== [3] Build toolchain ==="
+############################################
 sudo apt-get update -y
 sudo apt-get install -y build-essential gcc-9 g++-9 git cmake ninja-build libaio-dev
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90
 sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 90
 echo "[OK] gcc: $(gcc --version | head -1)"
 
+############################################
 echo "=== [4] Miniconda (if missing) ==="
+############################################
+
 if ! command -v conda >/dev/null 2>&1; then
   echo "[INFO] Installing Miniconda (user-local)"
   cd /tmp
@@ -73,6 +85,7 @@ fi
 ############################################
 # [5] Conda env (safe)                     #
 ############################################
+
 ENV_NAME="${ENV_NAME:-pccheck121}"     # default if unset
 echo "=== [5] Conda env: ${ENV_NAME} ==="
 
@@ -138,49 +151,88 @@ print("[OK] CUDA available:", torch.cuda.is_available(), "GPUs:", torch.cuda.dev
 for i in range(torch.cuda.device_count()):
     p=torch.cuda.get_device_properties(i); print(f"  GPU[{i}] {p.name} cc {p.major}.{p.minor}")
 PY
-echo "=== [7] NVIDIA Apex (V100 arch) ==="
-if [ ! -d "$HOME/apex" ]; then git clone https://github.com/NVIDIA/apex.git "$HOME/apex"; fi
+
+############################################
+# [7] NVIDIA Apex (build for V100 sm_70)
+############################################
+echo "=== [7] Build Apex (V100 arch) ==="
+[ -d "$HOME/apex" ] || git clone https://github.com/NVIDIA/apex.git "$HOME/apex"
 pushd "$HOME/apex" >/dev/null
+
+# prefer gcc-9/g++-9 if present
+command -v gcc-9 >/dev/null 2>&1 && export CC=gcc-9
+command -v g++-9 >/dev/null 2>&1 && export CXX=g++-9
+
+# V100 (sm_70); adjust if you target other GPUs
 export TORCH_CUDA_ARCH_LIST="7.0"
-pip install -v --no-build-isolation --no-cache-dir \
+
+python -m pip install -v --no-build-isolation --no-cache-dir \
   --global-option="--cpp_ext" --global-option="--cuda_ext" .
 popd >/dev/null
+echo "=== Apex build done ==="
 
-echo "=== [8] PCcheck repo (editable) ==="
-if [ ! -d "$REPO_DIR" ]; then git clone https://github.com/eth-easl/pccheck.git "$REPO_DIR"; fi
-pushd "$REPO_DIR" >/dev/null
-pip install -e .
-export PYTHONPATH="$PWD:$PYTHONPATH"
-echo "[OK] PYTHONPATH wired -> $(python -c 'import sys;print(sys.path[0])')"
 
-echo "=== [9] Build native writer (.so) against CUDA 12.1 ==="
-pushd checkpoint_eval/pccheck >/dev/null
+############################################
+# [8] PCcheck repo (editable)
+############################################
+export REPO_DIR="${REPO_DIR:-$HOME/pccheck}"
+echo "=== [8] PCcheck repo at: $REPO_DIR ==="
+
+if [ ! -d "$REPO_DIR/.git" ]; then
+  git clone https://github.com/eth-easl/pccheck.git "$REPO_DIR"
+else
+  echo "[info] Repo already exists, pulling latest..."
+  git -C "$REPO_DIR" pull --ff-only || true
+fi
+
+cd "$REPO_DIR"
+git remote -v | sed 's/^/[git]/'
+
+# clean any old editable install pointing elsewhere
+python -m pip uninstall -y checkpoint_eval || true
+
+# install package so 'checkpoint_eval' imports (no manual PYTHONPATH needed)
+python -m pip install -e .
+
+# robust import-location check (namespace-pkg friendly)
+python - <<'PY'
+import importlib.util
+spec = importlib.util.find_spec('checkpoint_eval')
+locs = getattr(spec, 'submodule_search_locations', None)
+print("[OK] checkpoint_eval at:", (list(locs)[0] if locs else spec.origin))
+PY
+
+
+############################################
+# [9] Build native lib (CUDA 12.1)
+############################################
+echo "=== [9] Build libtest_ssd.so ==="
+cd "$REPO_DIR/checkpoint_eval/pccheck"
+
+# CUDA 12.1 toolchain
+export CUDA_HOME=/usr/local/cuda-12.1
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+
+# clean + build
 rm -f *.o *.so
-# some trees include -lpmem in Makefile; we compile directly to avoid PMem dep
-g++-9 -O3 -fPIC -std=c++17 \
+CXX_BIN="${CXX:-g++}"
+$CXX_BIN -O3 -fPIC -std=c++17 \
   -I"$CUDA_HOME/include" \
   -shared main_ssd_memory.cpp socket_work.cpp \
   -o libtest_ssd.so \
-  -L"$CUDA_HOME/lib64" -lcudart -lpthread -laio -latomic
-echo "[DEBUG] ldd libtest_ssd.so:"
-ldd libtest_ssd.so | grep -E 'cudart|aio|pthread' || true
-popd >/dev/null
+  -L"$CUDA_HOME/lib64" \
+  -lcudart -lpthread -laio -latomic
 
-echo "=== [10] Smoke test (VGG16; ckpt every 50 iters) ==="
-export TOKENIZERS_PARALLELISM=false
-if [ -f artifact_evaluation/test_simple.sh ]; then
-  bash artifact_evaluation/test_simple.sh | tee /tmp/pccheck_smoke.log
-else
-  python checkpoint_eval/models/vision/train_pccheck.py \
-    --arch vgg16 --batchsize 32 --dataset imagenet \
-    --cfreq 50 --max_async 4 --num_threads 2 --psize 1 \
-    --bench_total_steps 500 \
-    --c_lib_path "$REPO_DIR/checkpoint_eval/pccheck/libtest_ssd.so" \
-  | tee /tmp/pccheck_smoke.log
-fi
+ls -l libtest_ssd.so
+ldd libtest_ssd.so | grep -E 'cudart|not found' || true
 
-echo "---- summary ----"
-grep -E "Single Checkpoint time|THROUGHPUT IS" /tmp/pccheck_smoke.log || true
-popd >/dev/null
+############################################
+# [10] Run smoke test
+############################################
+echo "=== [10] Smoke test ==="
+cd "$REPO_DIR"
+export PYTHONPATH="$REPO_DIR:${PYTHONPATH:-}"
+bash artifact_evaluation/test_simple.sh
 
-echo "✅ All set."
+echo "✅ Done."
