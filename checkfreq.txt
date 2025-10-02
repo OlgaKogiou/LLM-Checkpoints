@@ -1,196 +1,181 @@
-# CheckFreq: Reproducible Setup & Run (no DALI)
+# CheckFreq — Docker Quickstart
 
-These steps reproduce Yi’s working run inside an NVIDIA PyTorch container, using the **native PyTorch dataloader** (no DALI). They assume a Linux host with NVIDIA GPUs.
+These are **copy‑paste** setup + run instructions that worked on our V100 box. Drop this into your repo’s README if useful.
 
 ---
 
-## 1) Host prerequisites
+## 0) Prerequisites
 
-* **NVIDIA driver** that supports CUDA 10.1 (driver ≥ 418.x is typically fine)
-* **Docker** installed
-* **NVIDIA Container Toolkit** (`nvidia-docker2` / `nvidia-container-toolkit`) so containers can see GPUs
+* Linux host with NVIDIA driver installed (e.g. 525+). Verify:
 
-**Quick host checks:**
+  ```bash
+  nvidia-smi
+  ```
+* Docker and NVIDIA Container Toolkit configured (so `--gpus all` works):
+
+  ```bash
+  docker --version
+  docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
+  ```
+* A dataset in ImageNet-like layout (or Imagenette) on the host, e.g.:
+
+  ```
+  ~/checkfreq_env/imagenet/
+  ├── train/
+  └── val/
+  ```
+
+> **Why these versions?** We use the **legacy, known‑good** NVIDIA PyTorch container `nvcr.io/nvidia/pytorch:19.05-py3` (PyTorch 1.1/CUDA 10.1). It works out of the box with CheckFreq’s code paths we’re using (native dataloader, no DALI).
+
+---
+
+## 1) Pull code & prepare folders
 
 ```bash
-nvidia-smi                      # should show your GPUs
-docker --version
-docker run --rm --gpus all nvidia/cuda:10.1-base nvidia-smi
+mkdir -p ~/checkfreq_env && cd ~/checkfreq_env
+
+# Clone your repos here (adjust URLs/branches to your fork)
+# CheckFreq repo
+git clone <YOUR_CHECKFREQ_GIT_URL> CheckFreq
+# CoorDL repo (if needed by your training script)
+git clone <YOUR_COORDL_GIT_URL> CoorDL
+
+# Put / link your dataset here
+# e.g., ln -s /mnt/datasets/imagenet ~/checkfreq_env/imagenet
 ```
 
 ---
 
-## 2) Create a working folder & put data
-
-Pick a workspace on the host, e.g. `~/checkfreq_env`.
-
-```bash
-export HOST_WORK=~/checkfreq_env
-mkdir -p "$HOST_WORK"
-```
-
-Place your dataset at `~/checkfreq_env/imagenet` (or a subset like Imagenette) with the usual ImageNet-style layout:
-
-```
-imagenet/
-  train/<class>/*
-  val/<class>/*
-```
-
----
-
-## 3) Get the code
-
-Clone both repos into the workspace (or copy your existing clones there):
-
-```bash
-cd "$HOST_WORK"
-# If you already have these, just ensure they live under $HOST_WORK
-# git clone <your CheckFreq repo> CheckFreq
-# git clone <your CoorDL repo>   CoorDL
-```
-
-> Note: **CoorDL** is not a pip package in this setup; we’ll add it via `PYTHONPATH`.
-
----
-
-## 4) Start the container (PyTorch 19.05, CUDA 10.1)
-
-We’ll use NVIDIA’s historical image that matches the working environment.
+## 2) Start a container (with GPUs and volumes)
 
 ```bash
 docker run --rm -it --gpus all --ipc=host \
-  -v "$HOST_WORK":/work \
+  -v ~/checkfreq_env:/work \
   nvcr.io/nvidia/pytorch:19.05-py3 bash
 ```
 
-This drops you into a shell **inside** the container at `/workspace` (we’ll work under `/work`).
+Notes:
+
+* `--ipc=host` avoids PyTorch shared‑memory warnings.
+* If you want to pin to specific host GPUs at start, use:
+
+  ```bash
+  docker run --rm -it --gpus '"device=1,2,3"' --ipc=host \
+    -v ~/checkfreq_env:/work \
+    nvcr.io/nvidia/pytorch:19.05-py3 bash
+  ```
 
 ---
 
-## 5) Prepare Python in the container
-
-Upgrade basic packaging tools and add the repos to `PYTHONPATH`:
+## 3) In the container: set paths & sanity‑check CUDA
 
 ```bash
-python -V
-pip install --upgrade pip wheel setuptools
-# Make sure any previous DALI bits don’t interfere
-pip uninstall -y nvidia-dali 'nvidia-dali-cuda*' || true
-
-# Make both repos importable
+# Inside container
 export PYTHONPATH=/work/CoorDL:/work/CheckFreq:$PYTHONPATH
-# Optional: raise file handle limit
-ulimit -n 65535
+cd /work/CheckFreq
 
-# Quick sanity
+# Optional: quick GPU sanity
 python - <<'PY'
-import torch, os
-print('torch:', torch.__version__, ' cuda:', torch.version.cuda)
-print('cuda available:', torch.cuda.is_available(), 'gpus:', torch.cuda.device_count())
-print('PYTHONPATH=', os.environ.get('PYTHONPATH'))
+import torch
+print('torch', torch.__version__, 'cuda', torch.version.cuda)
+print('visible gpus:', torch.cuda.device_count())
+for i in range(torch.cuda.device_count()):
+    print(i, torch.cuda.get_device_name(i))
 PY
 ```
 
 ---
 
-## 6) Run a smoke test (multi‑GPU, 1 epoch)
+## 4) Run training (native dataloader)
 
-From inside the container:
+We avoid DALI here (older DALI ops differ). Use the **native dataloader** path.
+
+### A) Single‑GPU example
 
 ```bash
-cd /work/CheckFreq
-python -m torch.distributed.launch --nproc_per_node=4 \
+export CUDA_VISIBLE_DEVICES=1    # pick a free GPU (avoid a busy GPU 0 if needed)
+python -m torch.distributed.launch --nproc_per_node=1 \
+  models/image_classification/pytorch-imagenet-cf.py \
+  -a resnet18 -b 128 --workers 2 --epochs 1 \
+  --deterministic --noeval --barrier \
+  --checkfreq --chk-prefix ./chk_smoke/ \
+  --data /work/imagenet | tee /work/run_checkfreq_1gpu.log
+```
+
+### B) Multi‑GPU example (3 GPUs, skipping GPU 0)
+
+```bash
+export CUDA_VISIBLE_DEVICES=1,2,3
+python -m torch.distributed.launch --nproc_per_node=3 \
   models/image_classification/pytorch-imagenet-cf.py \
   -a resnet18 -b 128 --workers 3 --epochs 1 \
   --deterministic --noeval --barrier \
   --checkfreq --chk-prefix ./chk_smoke/ \
-  --data /work/imagenet | tee /work/run_checkfreq_imagenette.log
+  --data /work/imagenet | tee /work/run_checkfreq_3gpu.log
 ```
 
-**Flags explained:**
-
-* `--nproc_per_node=4` → use 4 GPUs (adjust to your machine)
-* `-b 128` → global batch; tune up/down for memory
-* `--chk-prefix ./chk_smoke/` → where checkpoints will live; reusing the same prefix lets you resume
-* `--noeval` / `--epochs 1` → keep this fast for sanity checks
-
-You should see throughput and a finishing summary (Top-1/Top-5 may be 0 on tiny datasets; that’s fine for smoke).
+> **Tip (OOM):** If you hit CUDA OOM, drop `-b` (batch size), e.g. `-b 64` or `-b 32`, and/or reduce `--workers`.
 
 ---
 
-## 7) Rerun & resume
+## 5) Resuming / Checkpoints
 
-* To **resume**, just reuse the same `--chk-prefix` and increase `--epochs`.
-* To start a **fresh** run, point `--chk-prefix` to a new directory (e.g., `./chk_run2/`).
-* If you get OOM, reduce `-b` (e.g., `-b 64`) or `--workers`.
+CheckFreq uses a checkpoint prefix directory. The above commands write to `./chk_smoke/` under `/work/CheckFreq`. To resume a broken run, just rerun with the same `--chk-prefix` and it will pick up the latest consistent state (no manual `--resume` path required).
 
 ---
 
-## 8) Troubleshooting tips
-
-* **“swapoff: Not superuser.”** Harmless inside the container; can ignore.
-* **Dataset path errors** → verify `/work/imagenet` exists **in the container**: `ls -R /work/imagenet | head`.
-* **Fewer GPUs** → change `--nproc_per_node`. You can also run single‑GPU by setting it to `1`.
-* **We are not using DALI here.** (Older DALI builds lack `ImageDecoderRandomCrop` and the `resume_*` args used by `--cf_iterator`.) If you later want DALI, use a container + DALI build matched to your CUDA (10.0/10.1) and remove the `--cf_iterator` flag.
-
----
-
-## 9) Safe ways to *check* things without deleting images
-
-You can inspect and test an image without removing it. Images are read‑only; containers are disposable.
-
-**List images & sizes (host):**
+## 6) Verifying local Docker images **without pulling**
 
 ```bash
+# List images you already have
 docker images
-docker system df           # disk usage of images/containers
+
+# Run a quick nvidia-smi using local image only (no network pull)
+for img in \
+  nvidia/cuda:11.8.0-base-ubuntu22.04 \
+  nvidia/cuda:12.4.0-base-ubuntu22.04 \
+  nvcr.io/nvidia/pytorch:19.05-py3
+Do
+  echo ">>> $img"
+  docker image inspect "$img" >/dev/null 2>&1 \
+    && docker run --rm --pull=never --gpus all "$img" nvidia-smi >/dev/null \
+    && echo "ok: present & runnable" \
+    || echo "miss: not present or not runnable without pull"
+Done
+
+# Show metadata
+docker image inspect nvcr.io/nvidia/pytorch:19.05-py3 \
+  --format 'RepoTags: {{.RepoTags}} | Id: {{.Id}} | Created: {{.Created}} | Size(bytes): {{.Size}}'
 ```
-
-**Inspect metadata (host):**
-
-```bash
-docker image inspect nvcr.io/nvidia/pytorch:19.05-py3 | less
-```
-
-**Quick tests in a throwaway container (image remains intact):**
-
-```bash
-# Run a command and exit; container is auto‑removed, image persists
-docker run --rm nvcr.io/nvidia/pytorch:19.05-py3 python -V
-
-# Interactive shell to poke around; exit when done
-docker run --rm -it --gpus all --ipc=host \
-  -v "$HOST_WORK":/work nvcr.io/nvidia/pytorch:19.05-py3 bash
-# (inside) pip list | head
-# (inside) python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-```
-
-**Save/restore (optional backup):**
-
-```bash
-# Save the image to a tarball (no deletion)
-docker save nvcr.io/nvidia/pytorch:19.05-py3 -o pytorch1905.tar
-# Load it back later if needed
-docker load -i pytorch1905.tar
-```
-
-> Avoid `docker system prune -a` unless you intend to free space aggressively (it deletes unused images). Use the checks above to explore safely.
 
 ---
 
-## 10) One‑liner re‑run template
+## 7) Common issues
+
+* **Another user is on GPU 0** → mask it out:
+
+  ```bash
+  export CUDA_VISIBLE_DEVICES=1,2,3
+  ```
+* **CUDA OOM** → lower per‑GPU batch size: `-b 64` (or `-b 32`).
+* **Slow dataloading** → reduce workers (`--workers 2`) or ensure dataset is on fast storage.
+* **DALI errors** (e.g. missing ops) → keep `--dali` **off** with this legacy container.
+* **Logs** → we use `tee` to write logs under `/work/*.log`.
+
+---
+
+## 8) One‑liner recap
 
 ```bash
-# inside container
-cd /work/CheckFreq
-python -m torch.distributed.launch --nproc_per_node=<GPUS> \
-  models/image_classification/pytorch-imagenet-cf.py \
-  -a resnet50 -b <BATCH> --workers <WORKERS> --epochs <EPOCHS> \
-  --deterministic --noeval --barrier \
-  --checkfreq --chk-prefix ./chk_<RUNNAME>/ \
-  --data /work/imagenet | tee /work/run_<RUNNAME>.log
+# Host: prepare
+mkdir -p ~/checkfreq_env && cd ~/checkfreq_env
+# clone CheckFreq + CoorDL, and ensure dataset at ~/checkfreq_env/imagenet
+
+# Start container
+docker run --rm -it --gpus all --ipc=host \
+  -v ~/checkfreq_env:/work nvcr.io/nvidia/pytorch:19.05-py3 bash
+
+# In container
+export PYTHONPATH=/work/CoorDL:/work/CheckFreq:$PYTHONPATH
+cd /work/CheckF
 ```
-
-That’s it—this matches the known‑good environment and flow that produced a successful run with the native dataloader.
-
