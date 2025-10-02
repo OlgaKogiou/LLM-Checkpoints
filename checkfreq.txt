@@ -1,6 +1,5 @@
 # CheckFreq — Docker Quickstart
 
-These are **copy‑paste** setup + run instructions that worked on our V100 box. Drop this into your repo’s README if useful.
 
 ---
 
