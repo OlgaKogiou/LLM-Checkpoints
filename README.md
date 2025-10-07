@@ -12,6 +12,8 @@ It uses a known-good NVIDIA PyTorch container and the **native PyTorch dataloade
 - Linux with NVIDIA GPU + recent driver
 - Docker + NVIDIA runtime (`nvidia-container-toolkit`)
 - Sanity check:
+
+```bash
 # Ubuntu 22.04 base (recommended)
 sudo docker pull nvidia/cuda:11.8.0-base-ubuntu22.04
 sudo docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
@@ -19,7 +21,7 @@ sudo docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
 # Or Ubuntu 20.04
 sudo docker pull nvidia/cuda:11.8.0-base-ubuntu20.04
 sudo docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu20.04 nvidia-smi
-
+```
 ---
 
 ## 1) Create a workspace & clone the repos (host)
