@@ -14,6 +14,16 @@ It uses a known-good NVIDIA PyTorch container and the **native PyTorch dataloade
 - Sanity check:
 
 ```bash
+# Check Ubuntu version
+lsb_release -a
+No LSB modules are available.
+Distributor ID: Ubuntu
+Description:    Ubuntu 22.04.5 LTS
+Release:        22.04
+Codename:       jammy
+```
+
+```bash
 # Ubuntu 22.04 base (recommended)
 sudo docker pull nvidia/cuda:11.8.0-base-ubuntu22.04
 sudo docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
