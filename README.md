@@ -5,16 +5,18 @@
 ```bash
 python3 -m venv your_venv_name
 source your_venv_name/bin/activate
+```
 
 ## Install torch etc:
 ```bash
 pip install torch==2.9.1+rocm6.3 --index-url [https://download.pytorch.org/whl/rocm6.3](https://download.pytorch.org/whl/rocm6.3)
+```
 
 ## Install DFTracer:
 ```bash
 DFTRACER_VERSION=paper/dfprofiler
 pip install git+https://github.com/LLNL/dftracer.git@${DFTRACER_VERSION}
-
+```
 ## Environment Dependencies
 
 ---
