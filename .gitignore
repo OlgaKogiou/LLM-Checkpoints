@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+
+# Environment / local config
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs / traces
+*.log
+logs/
+
+# Core dumps
+*.core
+core
+
+# Hugging Face / datasets caches
+.hf_cache/
+.hf_datasets_cache/
+.huggingface/
+
+# Training outputs and checkpoints
+checkpoints/
+results/
+outputs/
+
+# This repo's local model + generated artifacts
+llama-3-8b/
+
+# DeepSpeed / PyTorch artifacts
+*.pt
+*.pth
+*.bin
+*.safetensors
+zero_to_fp32.py
+
+# System files
+.DS_Store
