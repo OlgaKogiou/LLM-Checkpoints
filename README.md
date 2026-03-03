@@ -1,6 +1,5 @@
 
 # Llama 8B Training with DeepSpeed and DFTracer Aggr on Tuolumne LLNL
----
 
 ## Create venv:
 ```bash
@@ -18,6 +17,7 @@ pip install git+https://github.com/LLNL/dftracer.git@${DFTRACER_VERSION}
 
 ## Environment Dependencies
 
+---
 Configured for ROCm 6.3:
 
     * `torch==2.9.1+rocm6.3`
