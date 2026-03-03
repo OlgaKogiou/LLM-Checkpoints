@@ -14,7 +14,7 @@ os.environ["DFTRACER_TRACE_COMPRESSION"] = "1"
 os.environ["DFTRACER_INIT"] = "FUNCTION"   # Using function-level tracing instead of LD_PRELOAD
 os.environ["DFTRACER_BIND_SIGNALS"] = "0"
 os.environ["DFTRACER_LOG_LEVEL"] = "INFO"
-os.environ["DFTRACER_WRITE_BUFFER_SIZE"] = "4096" # NO inline comments here!
+os.environ["DFTRACER_WRITE_BUFFER_SIZE"] = "4096" 
 os.environ["DFTRACER_DISABLE_STDIO"] = "0"
 os.environ["LD_LIBRARY_PATH"] = "/usr/workspace/kogiou1/venvs/deepspeed_venv_dftracer/lib/python3.11/site-packages/dftracer/lib:/usr/workspace/kogiou1/venvs/deepspeed_venv_dftracer/lib/python3.11/site-packages/dftracer/lib64"
 
