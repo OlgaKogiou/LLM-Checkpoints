@@ -54,3 +54,10 @@ dataset = load_dataset("teknium/OpenHermes-2.5")
 
 # Save to disk for fast local loading during training
 dataset.save_to_disk(data_path)
+```
+
+## To run:
+```bash
+chmod + x ./script_llama_zero3.sh
+flux batch -N 16 -x -t 30 -q pbatch ./script_llama_zero3.sh
+```
