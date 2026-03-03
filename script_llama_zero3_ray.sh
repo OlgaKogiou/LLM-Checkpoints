@@ -39,6 +39,7 @@ export CUDA_HOME=$ROCM_PATH
 # 3. Path Overrides (Crucial for Lustre usage)
 export HF_HOME="/p/lustre5/sinurat1/venvs/ml-workloads/tuolumne/llama/.hf_cache"
 export DATA_FOLDER="/p/lustre5/sinurat1/dataset/ml-workloads/hf_datasets"
+export BASE_OUTPUT_DIR="/p/lustre5/iopp/rayandrew/dfprofiler/results/llama-3-8b"
 export HF_DATASETS_CACHE="/p/lustre5/sinurat1/venvs/ml-workloads/tuolumne/llama/.hf_datasets_cache"
 export HF_DATASETS_TRUST_REMOTE_CODE=True
 if [[ -z "${HF_TOKEN}" && -f "${HF_HOME}/token" ]]; then
@@ -87,6 +88,8 @@ export DFTRACER_DISABLE_STDIO=0
 export MASTER_ADDR=$(hostname -s)
 export MASTER_PORT=$(shuf -i 20000-65000 -n 1)
 export RUN_ID=${RUN_ID:-${FLUX_JOB_ID:-$(date +%Y%m%d_%H%M%S)}}
+export OUTPUT_ROOT="${BASE_OUTPUT_DIR}/${RUN_ID}"
+mkdir -p ${OUTPUT_ROOT}/logs
 deepspeed \
     --launcher pdsh \
     --master_addr $MASTER_ADDR \
@@ -96,7 +99,7 @@ deepspeed \
     train_llama3.py \
     --deepspeed_config /usr/workspace/sinurat1/LLM-Checkpoints/ds_config_zero3_ray_1node.json \
     --model_id /usr/workspace/sinurat1/LLM-Checkpoints/llama-3-8b \
-    --output_root /p/lustre5/iopp/rayandrew/dfprofiler/results/llama-3-8b \
+    --output_root ${OUTPUT_ROOT} \
     --data_folder_dir ${DATA_FOLDER} \
-    --dataset_name teknium/OpenHermes-2.5 \
-    --max_step 200
+    --dataset_name teknium/OpenHermes-2.5 | tee -a ${OUTPUT_ROOT}/output.log
+    # --max_step 200 | tee -a ${OUTPUT_ROOT}/output.log
