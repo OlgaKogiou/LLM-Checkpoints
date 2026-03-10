@@ -43,3 +43,5 @@ zero_to_fp32.py
 
 # System files
 .DS_Store
+
+flux_outputs/

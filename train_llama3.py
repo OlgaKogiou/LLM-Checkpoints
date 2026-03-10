@@ -1,7 +1,8 @@
 from torch.utils.data import Dataset
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 import os
 from pathlib import Path
+import hashlib
 
 import argparse
 import deepspeed
@@ -18,30 +19,16 @@ from dftracer.python import dftracer, ai
 
 
 class OpenHermesDataset(Dataset):
-    def __init__(self, dataset_name, tokenizer, max_length=128, cache_dir=None):
-        self.raw_data = load_dataset(dataset_name, split="train", cache_dir=cache_dir)
-        self.tokenizer = tokenizer
-        self.max_length = max_length
+    def __init__(self, tokenized_data):
+        self.tokenized_data = tokenized_data
 
     def __len__(self):
-        return len(self.raw_data)
+        return len(self.tokenized_data)
 
     @ai.data.item
     def __getitem__(self, idx):
-        example = self.raw_data[idx]
-
-        with ai.data.preprocess:
-            text = str(example)
-            tokenized = self.tokenizer(
-                text,
-                truncation=True,
-                max_length=self.max_length,
-                padding=False,
-                return_tensors=None,
-            )
-
-        total_bytes = len(text.encode("utf-8"))
-        ai.update(image_size=total_bytes, image_idx=idx)
+        tokenized = self.tokenized_data[idx]
+        ai.update(image_size=len(tokenized["input_ids"]), image_idx=idx)
 
         return {
             "input_ids": tokenized["input_ids"],
@@ -61,12 +48,119 @@ class CustomDataCollatorForLanguageModeling(DataCollatorForLanguageModeling):
         raise ValueError(f"Framework '{return_tensors}' not recognized!")
 
 
-def format_duration(seconds: float) -> str:
-    total_seconds = 0 if seconds <= 0 else max(1, math.ceil(seconds))
-    minutes, remaining_seconds = divmod(total_seconds, 60)
-    if minutes == 0:
-        return f"{remaining_seconds}s"
-    return f"{minutes}m {remaining_seconds}s"
+def format_seconds(seconds: float) -> str:
+    return f"{seconds:.2f}s"
+
+
+def normalize_example_text(example):
+    if "text" in example and example["text"] is not None:
+        return str(example["text"])
+
+    if "messages" in example and example["messages"] is not None:
+        return str(example["messages"])
+
+    if "instruction" in example or "output" in example:
+        instruction = str(example.get("instruction", ""))
+        input_text = str(example.get("input", ""))
+        output = str(example.get("output", ""))
+        if input_text:
+            return (
+                f"Instruction:\n{instruction}\n\n"
+                f"Input:\n{input_text}\n\n"
+                f"Output:\n{output}"
+            )
+        return f"Instruction:\n{instruction}\n\nOutput:\n{output}"
+
+    return str(example)
+
+
+def build_or_load_pretokenized_dataset(dataset_name, tokenizer, max_length=128, cache_dir=None):
+    cache_root = os.environ.get("PRETOKENIZE_CACHE_DIR")
+    if not cache_root:
+        if cache_dir:
+            cache_root = os.path.join(cache_dir, "pretokenized")
+        else:
+            cache_root = str(Path.cwd() / ".pretokenized")
+
+    dataset_key = hashlib.sha1(
+        f"{dataset_name}|{max_length}|{tokenizer.name_or_path}".encode("utf-8")
+    ).hexdigest()[:16]
+    tokenized_cache_dir = os.path.join(cache_root, f"openhermes_{dataset_key}")
+    ready_marker = os.path.join(tokenized_cache_dir, "_READY")
+
+    map_num_proc = int(os.environ.get("PRETOKENIZE_NUM_PROC", "8"))
+    if map_num_proc < 1:
+        map_num_proc = 1
+
+    wait_seconds = int(os.environ.get("PRETOKENIZE_WAIT_SECONDS", "7200"))
+
+    global_rank = 0
+    if dist.is_available() and dist.is_initialized():
+        global_rank = dist.get_rank()
+    else:
+        global_rank = int(os.environ.get("RANK", "0"))
+
+    cache_ready = os.path.isdir(tokenized_cache_dir) and os.path.exists(ready_marker)
+
+    if global_rank == 0 and not cache_ready:
+        raw_data = load_dataset(dataset_name, split="train", cache_dir=cache_dir)
+
+        def tokenize_batch(batch):
+            keys = list(batch.keys())
+            batch_size = len(batch[keys[0]]) if keys else 0
+            texts = []
+
+            for idx in range(batch_size):
+                example = {key: batch[key][idx] for key in keys}
+                texts.append(normalize_example_text(example))
+
+            return tokenizer(
+                texts,
+                truncation=True,
+                max_length=max_length,
+                padding=False,
+                return_tensors=None,
+            )
+
+        os.makedirs(cache_root, exist_ok=True)
+        tokenized_data = raw_data.map(
+            tokenize_batch,
+            batched=True,
+            remove_columns=raw_data.column_names,
+            load_from_cache_file=True,
+            num_proc=map_num_proc,
+            desc="Pretokenizing training dataset",
+        )
+        tokenized_data.save_to_disk(tokenized_cache_dir)
+        Path(ready_marker).touch()
+
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+    elif global_rank != 0:
+        start = time.time()
+        while not (os.path.isdir(tokenized_cache_dir) and os.path.exists(ready_marker)):
+            if time.time() - start > wait_seconds:
+                raise TimeoutError(
+                    f"Timed out waiting for pretokenized cache at {tokenized_cache_dir}. "
+                    "Increase PRETOKENIZE_WAIT_SECONDS or check rank-0 preprocessing logs."
+                )
+            time.sleep(5)
+
+    return load_from_disk(tokenized_cache_dir)
+
+
+def is_global_rank_0(args) -> bool:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank() == 0
+
+    env_rank = os.environ.get("RANK")
+    if env_rank is not None:
+        try:
+            return int(env_rank) == 0
+        except ValueError:
+            pass
+
+    return args.local_rank <= 0
 
 
 @ai
@@ -87,7 +181,7 @@ def run(args, data_folder_dir, output_dir):
             "Use --model_id with an existing local directory or a valid Hugging Face repo id."
         )
 
-    if args.local_rank <= 0:
+    if is_global_rank_0(args):
         print(f"Using model source: {model_id}")
         print(
             f"Model source type: {'local directory' if local_model else 'huggingface hub repo'}"
@@ -101,18 +195,19 @@ def run(args, data_folder_dir, output_dir):
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    custom_dataset = OpenHermesDataset(
+    tokenized_data = build_or_load_pretokenized_dataset(
         args.dataset_name,
         tokenizer,
         max_length=128,
         cache_dir=data_folder_dir,
     )
+    custom_dataset = OpenHermesDataset(tokenized_data)
     collate_fn = CustomDataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         attn_implementation="sdpa",
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         # low_cpu_mem_usage=args.low_cpu_mem_usage,
         use_cache=False,
         token=hf_token,
@@ -122,7 +217,7 @@ def run(args, data_folder_dir, output_dir):
     model_engine, optimizer, training_dataloader, lr_scheduler = deepspeed.initialize(
         args=args,
         model=model,
-        model_parameters=model.parameters(),
+        model_parameters=model.parameters(), # type: ignore
         training_data=custom_dataset,
         collate_fn=collate_fn,
     )
@@ -132,7 +227,7 @@ def run(args, data_folder_dir, output_dir):
     batches_to_skip = 0
 
     if args.resume_from_checkpoint:
-        if args.local_rank <= 0:
+        if is_global_rank_0(args):
             print(
                 f"Attempting to resume from checkpoint: {args.resume_from_checkpoint}"
             )
@@ -144,7 +239,7 @@ def run(args, data_folder_dir, output_dir):
             global_step = client_state.get("global_step", 0)
             batches_to_skip = client_state.get("batch_index", 0) + 1
 
-            if args.local_rank <= 0:
+            if is_global_rank_0(args):
                 print(
                     f"Successfully loaded checkpoint state! Resuming from Epoch {starting_epoch}, "
                     f"Global Step {global_step}, skipping {batches_to_skip} batches."
@@ -154,13 +249,55 @@ def run(args, data_folder_dir, output_dir):
     save_steps = args.save_steps
     should_stop = args.max_global_step > 0 and global_step >= args.max_global_step
     step_count = 0
+    step_window_sum = 0.0
+    step_window_sum_sq = 0.0
+    step_window_count = 0
+
+    steps_per_epoch_raw = len(training_dataloader)
+    grad_accum_steps = int(model_engine.gradient_accumulation_steps())
+    steps_per_epoch_global = steps_per_epoch_raw // grad_accum_steps
+
+    remaining_epochs = max(0, num_epochs - starting_epoch)
+    remaining_raw_steps = 0
+    remaining_global_steps = 0
+    if remaining_epochs > 0:
+        first_epoch_raw_remaining = max(0, steps_per_epoch_raw - batches_to_skip)
+        remaining_raw_steps = first_epoch_raw_remaining + (
+            (remaining_epochs - 1) * steps_per_epoch_raw
+        )
+
+        remaining_global_steps = (first_epoch_raw_remaining // grad_accum_steps) + (
+            (remaining_epochs - 1) * steps_per_epoch_global
+        )
+
+    capped_global_steps = remaining_global_steps
+    if args.max_global_step > 0:
+        capped_global_steps = min(
+            capped_global_steps,
+            max(0, args.max_global_step - global_step),
+        )
+
+    if is_global_rank_0(args):
+        print(f"Dataset samples: {len(custom_dataset)}")
+        print(
+            "DeepSpeed batch config: "
+            f"micro_batch_per_gpu={model_engine.train_micro_batch_size_per_gpu()}, "
+            f"grad_accum={grad_accum_steps}, "
+            f"train_batch_size={model_engine.train_batch_size()}"
+        )
+        print(
+            f"Steps/epoch: raw={steps_per_epoch_raw}, optimizer={steps_per_epoch_global}"
+        )
+        print(
+            f"Expected remaining steps from here: raw={remaining_raw_steps}, optimizer={capped_global_steps}"
+        )
 
     @ai.dataloader.fetch
     def fetch_next_batch(iterator):
         return next(iterator)
 
     for epoch in ai.pipeline.epoch.iter(
-        range(starting_epoch, num_epochs), include_iter=False
+        range(starting_epoch, num_epochs), include_iter=False # type: ignore
     ):
         if should_stop:
             break
@@ -168,9 +305,9 @@ def run(args, data_folder_dir, output_dir):
         epoch_start_time = time.perf_counter()
         data_iterator = iter(training_dataloader)
         batch_idx = 0
+        optimizer_step_start_time = time.perf_counter()
 
         while True:
-            step_start_time = time.perf_counter()
             ai.update(step=batch_idx, epoch=epoch, args={"global_step": global_step})
 
             if should_stop:
@@ -183,6 +320,7 @@ def run(args, data_folder_dir, output_dir):
 
             if epoch == starting_epoch and batch_idx < batches_to_skip:
                 batch_idx += 1
+                optimizer_step_start_time = time.perf_counter()
                 continue
 
             ai.compute.start()
@@ -206,13 +344,31 @@ def run(args, data_folder_dir, output_dir):
 
             if model_engine.is_gradient_accumulation_boundary():
                 global_step += 1
-                step_elapsed = time.perf_counter() - step_start_time
+                current_time = time.perf_counter()
+                step_elapsed = current_time - optimizer_step_start_time
+                optimizer_step_start_time = current_time
+                step_window_sum += step_elapsed
+                step_window_sum_sq += step_elapsed * step_elapsed
+                step_window_count += 1
 
-                if args.local_rank <= 0:
+                if is_global_rank_0(args) and global_step % args.track_step_per_n == 0:
+                    step_avg = step_window_sum / step_window_count
+                    step_var = max(0.0, (step_window_sum_sq / step_window_count) - (step_avg * step_avg))
+                    step_std = math.sqrt(step_var)
+
                     print(
                         f"Epoch: {epoch} | Global Step: {global_step} | Loss: {loss.item():.4f}"
                     )
-                    print(f"Step time: {format_duration(step_elapsed)}")
+                    print(
+                        "Step time stats "
+                        f"(N={step_window_count}): "
+                        f"sum={format_seconds(step_window_sum)} | "
+                        f"avg={format_seconds(step_avg)} | "
+                        f"std={format_seconds(step_std)}"
+                    )
+                    step_window_sum = 0.0
+                    step_window_sum_sq = 0.0
+                    step_window_count = 0
 
                 if args.max_global_step > 0 and global_step >= args.max_global_step:
                     should_stop = True
@@ -226,7 +382,7 @@ def run(args, data_folder_dir, output_dir):
                         "batch_index": batch_idx,
                     }
                     with ai.checkpoint.capture:
-                        if args.local_rank <= 0:
+                        if is_global_rank_0(args):
                             print(
                                 f"Saving checkpoint at global step {global_step} with tag '{tag}'..."
                             )
@@ -250,17 +406,34 @@ def run(args, data_folder_dir, output_dir):
             step_count += 1
 
             if args.max_step > 0 and step_count >= args.max_step:
-                print(f"Reached max raw step count of {args.max_step}. Stopping training loop.")
+                if is_global_rank_0(args):
+                    print(f"Reached max raw step count of {args.max_step}. Stopping training loop.")
                 should_stop = True
             if args.max_global_step > 0 and global_step >= args.max_global_step:
-                print(f"Reached max global step of {args.max_global_step}. Stopping training loop.")
+                if is_global_rank_0(args):
+                    print(f"Reached max global step of {args.max_global_step}. Stopping training loop.")
                 should_stop = True
 
-        if args.local_rank <= 0:
-            epoch_elapsed = time.perf_counter() - epoch_start_time
-            print(f"Epoch time: {format_duration(epoch_elapsed)}")
+        if is_global_rank_0(args):
+            if step_window_count > 0:
+                step_avg = step_window_sum / step_window_count
+                step_var = max(0.0, (step_window_sum_sq / step_window_count) - (step_avg * step_avg))
+                step_std = math.sqrt(step_var)
+                print(
+                    "Step time stats "
+                    f"(N={step_window_count}, partial): "
+                    f"sum={format_seconds(step_window_sum)} | "
+                    f"avg={format_seconds(step_avg)} | "
+                    f"std={format_seconds(step_std)}"
+                )
+                step_window_sum = 0.0
+                step_window_sum_sq = 0.0
+                step_window_count = 0
 
-    if args.local_rank <= 0:
+            epoch_elapsed = time.perf_counter() - epoch_start_time
+            print(f"Epoch time: {format_seconds(epoch_elapsed)}")
+
+    if is_global_rank_0(args):
         print("Training complete! Saving final model...")
     with ai.checkpoint.capture:
         model_engine.save_checkpoint(save_dir=output_dir, tag="final_model")
@@ -313,6 +486,12 @@ def get_args():
         "--save_steps", type=int, default=5, help="Save checkpoint every N global steps"
     )
     parser.add_argument(
+        "--track_step_per_n",
+        type=int,
+        default=1,
+        help="Print step metrics every N global steps",
+    )
+    parser.add_argument(
         "--low_cpu_mem_usage",
         action="store_true",
         help="Enable low CPU memory model loading in Hugging Face from_pretrained",
@@ -348,6 +527,10 @@ def main():
         raise ValueError(f"--num_epochs must be >= 1, got {args.num_epochs}")
     if args.save_steps < 1:
         raise ValueError(f"--save_steps must be >= 1, got {args.save_steps}")
+    if args.track_step_per_n < 1:
+        raise ValueError(
+            f"--track_step_per_n must be >= 1, got {args.track_step_per_n}"
+        )
     if args.max_global_step < -1:
         raise ValueError(f"--max-global-step must be >= -1, got {args.max_global_step}")
     if args.max_step < -1:
