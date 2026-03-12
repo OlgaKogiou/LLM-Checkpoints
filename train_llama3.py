@@ -1,8 +1,9 @@
 from torch.utils.data import Dataset
-from datasets import load_dataset, load_from_disk
+from datasets import load_dataset, load_from_disk, Dataset as HFDataset
 import os
 from pathlib import Path
 import hashlib
+import socket
 
 import argparse
 import deepspeed
@@ -16,7 +17,6 @@ import torch.distributed as dist
 import time
 import math
 from dftracer.python import dftracer, ai
-
 
 class OpenHermesDataset(Dataset):
     def __init__(self, tokenized_data):
@@ -74,7 +74,26 @@ def normalize_example_text(example):
     return str(example)
 
 
-def build_or_load_pretokenized_dataset(dataset_name, tokenizer, max_length=128, cache_dir=None):
+def pack_tokenized_dataset(tokenized_data, tokenizer, max_length):
+    eos_id = tokenizer.eos_token_id
+    all_ids = []
+    for example in tokenized_data:
+        all_ids.extend(example["input_ids"])
+        all_ids.append(eos_id)
+
+    packed_input_ids = []
+    packed_attention_mask = []
+    for i in range(0, len(all_ids) - max_length + 1, max_length):
+        packed_input_ids.append(all_ids[i : i + max_length])
+        packed_attention_mask.append([1] * max_length)
+
+    return HFDataset.from_dict({
+        "input_ids": packed_input_ids,
+        "attention_mask": packed_attention_mask,
+    })
+
+
+def build_or_load_pretokenized_dataset(dataset_name, tokenizer, max_length=128, cache_dir=None, packing=False):
     cache_root = os.environ.get("PRETOKENIZE_CACHE_DIR")
     if not cache_root:
         if cache_dir:
@@ -83,7 +102,7 @@ def build_or_load_pretokenized_dataset(dataset_name, tokenizer, max_length=128, 
             cache_root = str(Path.cwd() / ".pretokenized")
 
     dataset_key = hashlib.sha1(
-        f"{dataset_name}|{max_length}|{tokenizer.name_or_path}".encode("utf-8")
+        f"{dataset_name}|{max_length}|{tokenizer.name_or_path}|packing={packing}".encode("utf-8")
     ).hexdigest()[:16]
     tokenized_cache_dir = os.path.join(cache_root, f"openhermes_{dataset_key}")
     ready_marker = os.path.join(tokenized_cache_dir, "_READY")
@@ -131,6 +150,10 @@ def build_or_load_pretokenized_dataset(dataset_name, tokenizer, max_length=128, 
             num_proc=map_num_proc,
             desc="Pretokenizing training dataset",
         )
+        if packing:
+            print(f"Packing sequences into chunks of {max_length} tokens...")
+            tokenized_data = pack_tokenized_dataset(tokenized_data, tokenizer, max_length)
+            print(f"Packed dataset: {len(tokenized_data)} samples")
         tokenized_data.save_to_disk(tokenized_cache_dir)
         Path(ready_marker).touch()
 
@@ -203,6 +226,7 @@ def run(args, data_folder_dir, output_dir):
         tokenizer,
         max_length=args.max_seq_length,
         cache_dir=data_folder_dir,
+        packing=args.sequence_packing,
     )
     custom_dataset = OpenHermesDataset(tokenized_data)
     collate_fn = CustomDataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
@@ -211,7 +235,7 @@ def run(args, data_folder_dir, output_dir):
         model_source,
         # attn_implementation="sdpa",
         attn_implementation="flash_attention_2",
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         # low_cpu_mem_usage=args.low_cpu_mem_usage,
         use_cache=False,
         token=hf_token,
@@ -507,6 +531,11 @@ def get_args():
         help="Maximum sequence length for tokenization (default: 2048)",
     )
     parser.add_argument(
+        "--sequence_packing",
+        action="store_true",
+        help="Enable sequence packing: concatenate tokenized texts with EOS and chunk into fixed-length blocks",
+    )
+    parser.add_argument(
         "--low_cpu_mem_usage",
         action="store_true",
         help="Enable low CPU memory model loading in Hugging Face from_pretrained",
@@ -554,8 +583,12 @@ def main():
     base_output_dir = args.output_root
     data_folder_dir = args.data_folder_dir
     trace_logs_dir = f"{base_output_dir}/logs"
+    pid = os.getpid()
+    hostname = socket.gethostname()
+    pid_bytes = f"{hostname}-{pid}".encode("utf-8")
+    pid_hash = hashlib.sha1(pid_bytes).hexdigest()
     trace_output_dir = (
-        f"{trace_logs_dir}/app-{args.local_rank}-of-{torch.cuda.device_count()}"
+        f"{trace_logs_dir}/app-proc_{pid_hash}-lrank_{args.local_rank}"
     )
     output_dir = f"{base_output_dir}/checkpoints"
 

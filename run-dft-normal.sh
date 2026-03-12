@@ -5,7 +5,7 @@ set -euo pipefail
 SOURCE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 export JOB_NAME=llama3-dft-normal
-export APP_ID=llama3-8b/dft-normal
+export APP_ID=llama3-1b/dft-normal
 export DFTRACER_ENABLE=1
 export DFTRACER_INC_METADATA=1
 

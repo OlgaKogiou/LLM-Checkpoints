@@ -62,7 +62,7 @@ export HF_HOME="/p/lustre5/sinurat1/venvs/ml-workloads/tuolumne/llama/.hf_cache"
 export DATA_FOLDER="/p/lustre5/sinurat1/dataset/ml-workloads/hf_datasets"
 export APP_ID=${APP_ID:-llama3-8b}
 export BASE_OUTPUT_ROOT=${BASE_OUTPUT_ROOT:-/p/lustre5/iopp/rayandrew/dfprofiler/results}
-export BASE_OUTPUT_DIR=${BASE_OUTPUT_DIR:-${BASE_OUTPUT_ROOT}/${APP_ID}}
+export BASE_OUTPUT_DIR=${BASE_OUTPUT_DIR:-${BASE_OUTPUT_ROOT}/${APP_ID}/${NUM_NODES}n}
 export HF_DATASETS_CACHE="/p/lustre5/sinurat1/venvs/ml-workloads/tuolumne/llama/.hf_datasets_cache"
 export HF_DATASETS_TRUST_REMOTE_CODE=True
 if [[ -z "${HF_TOKEN}" && -f "${HF_HOME}/token" ]]; then
@@ -142,6 +142,8 @@ GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
 MAX_SEQ_LENGTH=${MAX_SEQ_LENGTH:-2048}
 TRACK_STEP_PER_N=${TRACK_STEP_PER_N:-20}
 SAVE_STEPS=${SAVE_STEPS:-1000}
+NUM_EPOCHS=${NUM_EPOCHS:-1}
+ENABLE_SEQUENCE_PACKING=${ENABLE_SEQUENCE_PACKING:-0}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-$((MICRO_BATCH_SIZE_PER_GPU * GRADIENT_ACCUMULATION_STEPS * WORLD_SIZE))}
 
 RUNTIME_DS_CONFIG="${OUTPUT_ROOT}/ds_config_runtime.json"
@@ -202,6 +204,11 @@ if ! flux run -N "${NUM_NODES}" -n "${NUM_NODES}" bash -lc 'h=$(hostname -s); ec
     exit 1
 fi
 
+PACKING_FLAG=""
+if [[ "${ENABLE_SEQUENCE_PACKING}" == "1" ]]; then
+    PACKING_FLAG="--sequence_packing"
+fi
+
 deepspeed \
     --launcher pdsh \
     --hostfile "${HOSTFILE}" \
@@ -217,6 +224,8 @@ deepspeed \
     --data_folder_dir "${DATA_FOLDER}" \
     --dataset_name "${DATASET_NAME}" \
     --max_seq_length "${MAX_SEQ_LENGTH}" \
+    --num_epochs "${NUM_EPOCHS}" \
     --save_steps "${SAVE_STEPS}" \
-    --track_step_per_n "${TRACK_STEP_PER_N}" | tee -a "${OUTPUT_ROOT}/output.log"
+    --track_step_per_n "${TRACK_STEP_PER_N}" \
+    ${PACKING_FLAG} | tee -a "${OUTPUT_ROOT}/output.log"
     # --max_step 200 | tee -a ${OUTPUT_ROOT}/output.log

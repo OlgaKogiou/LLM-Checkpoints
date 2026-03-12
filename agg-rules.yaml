@@ -1,0 +1,5 @@
+inclusion:
+  - cat == 'checkpoint'
+  - cat == 'data'
+  - cat == 'POSIX'
+  - duration < 1000
