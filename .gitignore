@@ -32,7 +32,9 @@ results/
 outputs/
 
 # This repo's local model + generated artifacts
-llama-3-8b/
+llama-3-1B/
+llama-3-3B/
+llama-3-8B/
 
 # DeepSpeed / PyTorch artifacts
 *.pt

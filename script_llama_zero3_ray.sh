@@ -125,7 +125,8 @@ NUM_NODES=${NUM_NODES:-1}
 GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 WORLD_SIZE=$((NUM_NODES * GPUS_PER_NODE))
 
-MODEL_ID=${MODEL_ID:-/usr/workspace/sinurat1/LLM-Checkpoints/llama-3-8b}
+MODEL_ID=${MODEL_ID:-meta-llama/Llama-3.2-1B}
+LOCAL_MODEL_PATH=${LOCAL_MODEL_PATH:-/usr/WS2/sinurat1/LLM-Checkpoints/llama-3-1B}
 DATASET_NAME=${DATASET_NAME:-teknium/OpenHermes-2.5}
 BASE_DS_CONFIG=${BASE_DS_CONFIG:-/usr/workspace/sinurat1/LLM-Checkpoints/ds_config_zero3_ray_1node.json}
 TRAIN_SCRIPT=${TRAIN_SCRIPT:-${PROJECT_ROOT}/train_llama3.py}
@@ -136,8 +137,9 @@ if [[ ! -f "${TRAIN_SCRIPT}" ]]; then
     exit 1
 fi
 
-MICRO_BATCH_SIZE_PER_GPU=${MICRO_BATCH_SIZE_PER_GPU:-4}
-GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-4}
+MICRO_BATCH_SIZE_PER_GPU=${MICRO_BATCH_SIZE_PER_GPU:-64}
+GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
+MAX_SEQ_LENGTH=${MAX_SEQ_LENGTH:-2048}
 TRACK_STEP_PER_N=${TRACK_STEP_PER_N:-20}
 SAVE_STEPS=${SAVE_STEPS:-1000}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-$((MICRO_BATCH_SIZE_PER_GPU * GRADIENT_ACCUMULATION_STEPS * WORLD_SIZE))}
@@ -187,6 +189,7 @@ echo "GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS}" | tee -a "${OU
 echo "TRACK_STEP_PER_N=${TRACK_STEP_PER_N}" | tee -a "${OUTPUT_ROOT}/output.log"
 echo "SAVE_STEPS=${SAVE_STEPS}" | tee -a "${OUTPUT_ROOT}/output.log"
 echo "TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE}" | tee -a "${OUTPUT_ROOT}/output.log"
+echo "MAX_SEQ_LENGTH=${MAX_SEQ_LENGTH}" | tee -a "${OUTPUT_ROOT}/output.log"
 echo "MASTER_ADDR=${MASTER_ADDR}" | tee -a "${OUTPUT_ROOT}/output.log"
 echo "MASTER_PORT=${MASTER_PORT}" | tee -a "${OUTPUT_ROOT}/output.log"
 echo "DS_ENV_FILE=${DS_ENV_FILE}" | tee -a "${OUTPUT_ROOT}/output.log"
@@ -209,9 +212,11 @@ deepspeed \
     "${TRAIN_SCRIPT}" \
     --deepspeed_config "${RUNTIME_DS_CONFIG}" \
     --model_id "${MODEL_ID}" \
+    --local_model_path "${LOCAL_MODEL_PATH}" \
     --output_root "${OUTPUT_ROOT}" \
     --data_folder_dir "${DATA_FOLDER}" \
     --dataset_name "${DATASET_NAME}" \
+    --max_seq_length "${MAX_SEQ_LENGTH}" \
     --save_steps "${SAVE_STEPS}" \
     --track_step_per_n "${TRACK_STEP_PER_N}" | tee -a "${OUTPUT_ROOT}/output.log"
     # --max_step 200 | tee -a ${OUTPUT_ROOT}/output.log

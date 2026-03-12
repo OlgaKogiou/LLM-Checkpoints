@@ -165,30 +165,33 @@ def is_global_rank_0(args) -> bool:
 
 @ai
 def run(args, data_folder_dir, output_dir):
-    model_id = args.model_id
     hf_token = (
         os.environ.get("HF_TOKEN")
         or os.environ.get("HUGGINGFACE_HUB_TOKEN")
         or os.environ.get("HF_HUB_TOKEN")
     )
 
-    local_model = os.path.isdir(model_id)
-    looks_like_path = model_id.startswith("/") or model_id.startswith(".")
+    model_id = args.model_id
+    local_model_path = args.local_model_path
+    local_model = local_model_path is not None
 
-    if looks_like_path and not local_model:
+    if local_model and not os.path.isdir(local_model_path):
         raise FileNotFoundError(
-            f"Model path does not exist: {model_id}. "
-            "Use --model_id with an existing local directory or a valid Hugging Face repo id."
+            f"Local model path does not exist: {local_model_path}. "
+            "Provide a valid directory via --local_model_path or omit it to download from Hugging Face."
         )
+
+    model_source = local_model_path if local_model else model_id
 
     if is_global_rank_0(args):
-        print(f"Using model source: {model_id}")
-        print(
-            f"Model source type: {'local directory' if local_model else 'huggingface hub repo'}"
-        )
+        print(f"Model id: {model_id}")
+        if local_model:
+            print(f"Loading from local path: {local_model_path}")
+        else:
+            print("Loading from Hugging Face Hub")
 
     tokenizer = AutoTokenizer.from_pretrained(
-        model_id,
+        model_source,
         token=hf_token,
         local_files_only=local_model,
     )
@@ -198,16 +201,17 @@ def run(args, data_folder_dir, output_dir):
     tokenized_data = build_or_load_pretokenized_dataset(
         args.dataset_name,
         tokenizer,
-        max_length=128,
+        max_length=args.max_seq_length,
         cache_dir=data_folder_dir,
     )
     custom_dataset = OpenHermesDataset(tokenized_data)
     collate_fn = CustomDataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        attn_implementation="sdpa",
-        dtype=torch.bfloat16,
+        model_source,
+        # attn_implementation="sdpa",
+        attn_implementation="flash_attention_2",
+        torch_dtype=torch.bfloat16,
         # low_cpu_mem_usage=args.low_cpu_mem_usage,
         use_cache=False,
         token=hf_token,
@@ -215,11 +219,11 @@ def run(args, data_folder_dir, output_dir):
     )
 
     model_engine, optimizer, training_dataloader, lr_scheduler = deepspeed.initialize(
-        args=args,
         model=model,
         model_parameters=model.parameters(), # type: ignore
         training_data=custom_dataset,
         collate_fn=collate_fn,
+        config=args.deepspeed_config,
     )
 
     starting_epoch = 0
@@ -326,7 +330,7 @@ def run(args, data_folder_dir, output_dir):
             ai.compute.start()
             with ai.device.transfer:
                 batch = {
-                    key: value.to(model_engine.local_rank)
+                    key: value.to(model_engine.device)
                     for key, value in batch.items()
                 }
 
@@ -440,8 +444,6 @@ def run(args, data_folder_dir, output_dir):
 
 
 def get_args():
-    default_local_model = str((Path(__file__).resolve().parent / "llama-3-8b"))
-
     parser = argparse.ArgumentParser(
         description="Pure DeepSpeed Llama 3 Training with Resume"
     )
@@ -454,8 +456,15 @@ def get_args():
     parser.add_argument(
         "--model_id",
         type=str,
-        default=default_local_model,
-        help="Model path or Hugging Face repo id",
+        default="meta-llama/Llama-3.2-1B",
+        help="Hugging Face model repo id (e.g. meta-llama/Llama-3.2-1B)",
+    )
+    parser.add_argument(
+        "--local_model_path",
+        type=str,
+        default=None,
+        help="Path to a local directory containing model weights. "
+             "When set, model and tokenizer are loaded from this path instead of --model_id.",
     )
     parser.add_argument(
         "--resume_from_checkpoint",
@@ -492,6 +501,12 @@ def get_args():
         help="Print step metrics every N global steps",
     )
     parser.add_argument(
+        "--max_seq_length",
+        type=int,
+        default=2048,
+        help="Maximum sequence length for tokenization (default: 2048)",
+    )
+    parser.add_argument(
         "--low_cpu_mem_usage",
         action="store_true",
         help="Enable low CPU memory model loading in Hugging Face from_pretrained",
@@ -499,7 +514,7 @@ def get_args():
     parser.add_argument(
         "--output_root",
         type=str,
-        default="/p/lustre5/iopp/rayandrew/dfprofiler/results/llama-3-8b",
+        default="/p/lustre5/iopp/rayandrew/dfprofiler/results/llama-3-1b",
         help="Root directory where run-specific outputs are written",
     )
     parser.add_argument(
