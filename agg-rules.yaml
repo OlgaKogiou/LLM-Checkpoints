@@ -1,5 +1,5 @@
 inclusion:
-  - cat == 'checkpoint'
-  - cat == 'data'
+  - cat IN {'data','dataloader','device'}
+  - name IN {'forward','backward'}
+exclusion:
   - cat == 'POSIX'
-  - duration < 1000

@@ -28,7 +28,9 @@ class OpenHermesDataset(Dataset):
     @ai.data.item
     def __getitem__(self, idx):
         tokenized = self.tokenized_data[idx]
-        ai.update(image_size=len(tokenized["input_ids"]), image_idx=idx)
+        # BUG(dftracer): in dftracer aggregation modes where step and epoch are included as keys
+        # thus making it too unique
+        # ai.update(image_size=len(tokenized["input_ids"]), image_idx=idx)
 
         return {
             "input_ids": tokenized["input_ids"],
@@ -336,8 +338,9 @@ def run(args, data_folder_dir, output_dir):
         optimizer_step_start_time = time.perf_counter()
 
         while True:
-            ai.update(step=batch_idx, epoch=epoch, args={"global_step": global_step})
-
+            # BUG(dftracer): in dftracer aggregation modes where step and epoch are included as keys
+            # thus making it too unique
+            # ai.update(step=batch_idx, epoch=epoch, args={"global_step": global_step})
             if should_stop:
                 break
 
